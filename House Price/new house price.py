@@ -3,8 +3,9 @@ from collections import Counter
 import matplotlib.pyplot as plt
 import numpy as np
 from scipy.optimize import curve_fit
-from sklearn.preprocessing import PolynomialFeatures
+from sklearn.preprocessing import PolynomialFeatures, LabelEncoder, RobustScaler
 from sklearn import linear_model
+from sklearn.pipeline import Pipeline
 import seaborn as sns
 
 from sklearn.decomposition import PCA
@@ -14,6 +15,7 @@ from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor, E
 from sklearn.svm import SVR, LinearSVR
 from sklearn.linear_model import SGDRegressor, BayesianRidge
 from sklearn.kernel_ridge import KernelRidge
+import xgboost as xgb
 
 import time
 
@@ -26,6 +28,12 @@ def load_data(trainfile, testfile):
     return raw_train, raw_test
 
 raw_train, raw_test = load_data('train.csv', 'test.csv')
+
+# drop outlier
+raw_train.drop(raw_train[(raw_train["GrLivArea"]>4000)
+                         &(raw_train["SalePrice"]<300000)].index,inplace=True)
+
+
 full = pd.concat([raw_train,raw_test])
 col = full.columns
 num_list = []
@@ -165,6 +173,11 @@ full.loc[full['LotFrontage'].isnull(), 'LotFrontage'] = predict_LotF
 
 ##--------------------------Features Engineering-----------------------##
 
+# Logarithmic transformation
+y = full.SalePrice[:len(raw_train)]
+y_log = np.log(y)
+full.drop(['SalePrice'],axis=1,inplace=True)
+
 # Qualitative features
 
 Sort_var_list = []
@@ -213,29 +226,111 @@ def map_values_2():
     return "well done!"
 map_values_2()
 
-
-
-
-
-
 onehot_df = pd.get_dummies(full[type_list])
 full = full.drop(type_list, axis=1)
 full = pd.merge(full,onehot_df,how='outer',on='Id')
 
-
 # Quantitative feature
 
+# Feature combination
+class labelen():
+    def __init__(self):
+        pass
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        lab = LabelEncoder()
+        full['GarageYrBlt'] = lab.fit_transform(full['GarageYrBlt'])
+        full['YearBuilt'] = lab.fit_transform(full['YearBuilt'])
+        full['YearRemodAdd'] = lab.fit_transform(full['YearRemodAdd'])
+        full['YrSold'] = lab.fit_transform(full['YrSold'])
+        return X
+
+
+class skew_dummy():
+    def __init__(self):
+        self.skew = 0.5
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        X_num = X.select_dtypes(exclude=['object'])
+        skewness = X_num.apply(lambda x: x.skew())
+        skewness_features = skewness[abs(skewness) >= self.skew].index
+        X[skewness_features] = np.log1p(X[skewness_features])
+        X = pd.get_dummies(X)
+        return X
+
+
+class feature_cross():
+    def __init__(self, addition=2):
+        self.addition = addition
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        if self.addition == 1:
+            X["TotalHouse"] = X["TotalBsmtSF"] + X["1stFlrSF"] + X["2ndFlrSF"]
+            X["TotalArea"] = X["TotalBsmtSF"] + X["1stFlrSF"] + X["2ndFlrSF"] + X["GarageArea"]
+
+        else:
+            X["TotalHouse"] = X["TotalBsmtSF"] + X["1stFlrSF"] + X["2ndFlrSF"]
+            X["TotalArea"] = X["TotalBsmtSF"] + X["1stFlrSF"] + X["2ndFlrSF"] + X["GarageArea"]
+
+            X["TotalHouse_OverallQual"] = X["TotalHouse"] * X["OverallQual"]
+            X["GrLivArea_OverallQual"] = X["GrLivArea"] * X["OverallQual"]
+            X["BsmtFinSF1_OverallQual"] = X["BsmtFinSF1"] * X["OverallQual"]
+
+            X["Bsmt"] = X["BsmtFinSF1"] + X["BsmtFinSF2"] + X["BsmtUnfSF"]
+            X["Rooms"] = X["FullBath"] + X["TotRmsAbvGrd"]
+
+            X["PorchArea"] = X["OpenPorchSF"] + X["EnclosedPorch"] + X["3SsnPorch"] + X["ScreenPorch"]
+            X["TotalPlace"] = X["TotalBsmtSF"] + X["1stFlrSF"] + X["2ndFlrSF"] + X["GarageArea"] + X["OpenPorchSF"] + X[
+                "EnclosedPorch"] + X["3SsnPorch"] + X["ScreenPorch"]
+        return X
+
+
+pipe = Pipeline([('lab', labelen()),
+                 ('feature_cross', feature_cross()),
+                 ('skew_dummy', skew_dummy()),
+                 ])
+
+
+full_pipe = pipe.fit_transform(full)
+
+
+# Normalization
+scaler = RobustScaler()
+X = full_pipe[:len(raw_train)]
+test_X = full_pipe[len(raw_train):]
+X_scaled_1 = scaler.fit_transform(X)
+test_X_scaled_1 = scaler.transform(test_X)
+
 # PCA
-y = full.SalePrice[:len(raw_train)]
-y_log = np.log(y)
-full.drop(['SalePrice'],axis=1,inplace=True)
-train = full[:len(raw_train)]
-test = full[len(raw_train):]
+pca = PCA(n_components=231)
+X_scaled = pca.fit_transform(X_scaled_1)
+test_X_scaled = pca.transform(test_X_scaled_1)
 
-pca = PCA(n_components=219)
+# np.save('X_scaled.npy',X_scaled)
+# np.save('y_log.npy', y_log)
+# np.save('test_X_scaled.npy', test_X_scaled)
 
-X_scaled = pca.fit_transform(train)
-test_X_scaled = pca.transform(test)
+# # PCA
+# y = full.SalePrice[:len(raw_train)]
+# y_log = np.log(y)
+# full.drop(['SalePrice'],axis=1,inplace=True)
+# train = full[:len(raw_train)]
+# test = full[len(raw_train):]
+#
+# pca = PCA(n_components=219)
+# X_scaled = pca.fit_transform(train)
+# test_X_scaled = pca.transform(test)
+
+
 
 #------------------------Basic Modeling & Evaluation----------------------#
 
@@ -262,18 +357,16 @@ models = [
     BayesianRidge()
 ]
 
-# import xgboost
-#
-# xg = xgboost.XGBRegressor()
+
 
 
 names = ["GBR","Lasso","Ridge",'ElasticNet',"SVR","BayesianRidge"]
 
 dict = {'Id':[],"GBR":[],"Lasso":[],"Ridge":[],'ElasticNet':[],"SVR":[],"BayesianRidge":[]}
-# for i in range(215,225,1):
+# for i in range(225,236,1):
 #     pca = PCA(n_components=i)
-#     X_scaled = pca.fit_transform(train)
-#     test_X_scaled = pca.transform(test)
+#     X_scaled = pca.fit_transform(X_scaled_1)
+#     test_X_scaled = pca.transform(test_X_scaled_1)
 #     dict['Id'].append(i)
 #     for name, model in zip(names, models):
 #         score = rmse_cv(model, X_scaled, y_log)
@@ -310,49 +403,53 @@ class grid():
         #              grid_search.cv_results_['mean_test_score'])
         #     plt.ylabel('STD')
         #     plt.show()
-
+        #
 
 ## GBR
 # step 1 : n_estimators         ----> 211
-# param_test1 = {'n_estimators':range(205,216,1)}
+#          learning rate        ----> 0.1
+# param_test1 = {'n_estimators':range(100,1100,100)
+#                # ,'learning_rate':[0.1,0.05,0.01]
+#                }
 # grid(GradientBoostingRegressor()).\
 #     grid_get(X_scaled,y_log,param_grid=param_test1)
 
 # step 2 :  max_depth           ----> 3
 # param_test2 = {'max_depth':range(3,14,2)}
-# grid(GradientBoostingRegressor(n_estimators=211)).\
+# grid(GradientBoostingRegressor(n_estimators=250)).\
 #     grid_get(X_scaled,y_log,param_grid=param_test2)
 #
-# step 3 :  min_samples_split   ----> 15
-# param_test3 = {'min_samples_split':range(10,20,1)}
-# grid(GradientBoostingRegressor(n_estimators=211,max_depth=3)).\
+# step 3 :  min_samples_split   ----> 26
+# param_test3 = {'min_samples_split':range(20,31,1)}
+# grid(GradientBoostingRegressor(n_estimators=250,max_depth=3)).\
 #     grid_get(X_scaled,y_log,param_grid=param_test3)
 
-# step 4 :  min_samples_leaf    ----> 8
+# step 4 :  min_samples_leaf    ----> 1
 # param_test4 = {'min_samples_leaf':range(1,11,1)}
 # grid(GradientBoostingRegressor(
-#     n_estimators=211,max_depth=3,min_samples_split=15)).\
+#     n_estimators=250,max_depth=3,min_samples_split=26)).\
 #     grid_get(X_scaled,y_log,param_grid=param_test4)
 #
 # step 5 :  subsample           ----> 0.7
 # param_test5 = {'subsample':np.arange(0.1,1.1,0.1)}
-# grid(GradientBoostingRegressor(n_estimators=211,
+# grid(GradientBoostingRegressor(n_estimators=250,
 #                                max_depth=3,
-#                                min_samples_split=15,
-#                                min_samples_leaf=8)).\
+#                                min_samples_split=26,
+#                                min_samples_leaf=1)).\
 #     grid_get(X_scaled,y_log,param_grid=param_test5)
 
 
 ## Lasso
 # step 1 :  learning rate       ----> 0.0003
 #           max iteration       ----> 1000
-# param_test1 = {'alpha':np.arange(0.0001,0.0011,0.0001),
-#                'max_iter':range(1000,11000,1000)}
+# param_test1 = {'alpha': np.arange(0.0001,0.0011,0.0001)
+#                ,'max_iter':range(1000,11000,1000)
+#                }
 # grid(Lasso()).grid_get(X_scaled,y_log,param_grid=param_test1)
 
 ## Ridge
-# step 1 :  learning rate       ----> 10.3
-# param_test1 = {'alpha':np.arange(9,11,0.1)}
+# step 1 :  learning rate       ----> 4.25
+# param_test1 = {'alpha':np.arange(1,101,1)}
 # grid(Ridge()).grid_get(X_scaled,y_log,param_grid=param_test1)
 
 ## BayesianRidge
@@ -365,22 +462,74 @@ class grid():
 # time2 = time.perf_counter()
 # print(time2-time1)
 
-## ElasticNet alpha 0.007, l1_ratio 0.01
-# param_test1 = {'alpha':np.arange(0.001,0.011,0.001),
-#                'l1_ratio':np.arange(1,11,1)}
+## ElasticNet alpha 0.0006, l1_ratio 0.38
+# param_test1 = {'alpha':np.arange(0.0001,0.0011,0.0001),
+#                'l1_ratio':np.arange(0.3,0.41,0.01)}
 # grid(ElasticNet()).grid_get(X_scaled,y_log,param_grid=param_test1)
 
+## Xgboost
+# xg = xgb.XGBRegressor(booster='gbtree'
+#                     , colsample_bylevel=1
+#                     , colsample_bynode=1
+#                     , colsample_bytree=0.6
+#                     , gamma=0
+#                     , importance_type='gain'
+#                     , learning_rate=0.01
+#                     , max_delta_step=0
+#                     , max_depth= 3
+#                     , min_child_weight=1.5
+#                     , n_estimators=5400
+#                     , n_jobs=-1
+#                     , nthread=None
+#                     , objective='reg:squarederror'
+#                     , reg_alpha=0.3
+#                     , reg_lambda=0.7
+#                     , scale_pos_weight=1
+#                     , silent=None
+#                     , subsample=0.6
+#                     , verbosity=1)
+# rmse_cv(xg,X_scaled,y_log)
+# step 1 :
+# param_test1 = {'alpha':np.arange(0.0001,0.0011,0.0001),
+#                'l1_ratio':np.arange(0.3,0.41,0.01)}
+# grid(ElasticNet()).grid_get(X_scaled,y_log,param_grid=param_test1)
+
+## KernelRidge
+# ker = KernelRidge(alpha=0.2 ,kernel='polynomial',degree=2 , coef0=2.5)
+# param_test1 = {'alpha':np.arange(0.20,0.31,0.01),
+#                'kernel':['polynomial'],
+#                'degree':[2,3],
+#                'coef0':np.arange(1.9,3,0.1)
+#                # 'coef0':[0.1]
+#                }
+# grid(KernelRidge()).grid_get(X_scaled,y_log,param_grid=param_test1)
+
+## SVR
+# # svr = SVR(gamma= 0.0004,kernel='rbf',C=13,epsilon=0.009)
+# param_test1 = {
+#                # 'gamma':np.arange(0.0001,0.0011,0.0001),
+#                # 'gamma':[0.0009],
+#                # 'kernel':['rbf'],
+#                # 'C':[15],
+#                # 'epsilon':np.arange(0.01,0.11,0.01)
+#                }
+# grid(SVR(gamma=0.0009,kernel='rbf',C=15,epsilon=0.04)).grid_get(X_scaled,y_log,param_grid=param_test1)
+
+models_set = [
+    GradientBoostingRegressor(n_estimators=250,
+                              max_depth=3,
+                              min_samples_split=26,
+                              min_samples_leaf=1,
+                              subsample=0.7),
+    Lasso(alpha=0.0003,max_iter=1000),
+    Ridge(alpha=4.25),
+    BayesianRidge(),
+    ElasticNet(alpha=0.0006,l1_ratio=0.38),
+    KernelRidge(alpha=0.2,kernel='polynomial',degree=2,coef0=2.5),
+    SVR(gamma=0.0009,kernel='rbf',C=15,epsilon=0.04)
+]
 
 
-models_set = [GradientBoostingRegressor(n_estimators=211,
-                                        max_depth=3,
-                                        min_samples_split=15,
-                                        min_samples_leaf=8,
-                                        subsample=0.7),
-              Lasso(alpha=0.0003,max_iter=1000),
-              Ridge(alpha=10.3),
-              BayesianRidge(),
-              ElasticNet(alpha=0.007,l1_ratio=0.01)]
 
 
 #-------------------------------Stacking-----------------------------------#
